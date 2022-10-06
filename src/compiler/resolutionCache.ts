@@ -14,7 +14,7 @@ namespace ts {
         removeResolutionsOfFile(filePath: Path): void;
         removeResolutionsFromProjectReferenceRedirects(filePath: Path): void;
         setFilesWithInvalidatedNonRelativeUnresolvedImports(filesWithUnresolvedImports: ESMap<Path, readonly string[]>): void;
-        createHasInvalidatedResolution(forceAllFilesAsInvalidated?: boolean): HasInvalidatedResolution;
+        createHasInvalidatedResolutions(customHasInvalidatedResolutions: HasInvalidatedResolutions): HasInvalidatedResolutions;
         hasChangedAutomaticTypeDirectiveNames(): boolean;
         isFileWithInvalidatedNonRelativeUnresolvedImports(path: Path): boolean;
 
@@ -236,7 +236,7 @@ namespace ts {
             invalidateResolutionOfFile,
             invalidateResolutionsOfFailedLookupLocations,
             setFilesWithInvalidatedNonRelativeUnresolvedImports,
-            createHasInvalidatedResolution,
+            createHasInvalidatedResolutions,
             isFileWithInvalidatedNonRelativeUnresolvedImports,
             updateTypeRootsWatch,
             closeTypeRootsWatch,
@@ -300,17 +300,13 @@ namespace ts {
             return !!value && !!value.length;
         }
 
-        function createHasInvalidatedResolution(forceAllFilesAsInvalidated?: boolean): HasInvalidatedResolution {
+        function createHasInvalidatedResolutions(customHasInvalidatedResolutions: HasInvalidatedResolutions): HasInvalidatedResolutions {
             // Ensure pending resolutions are applied
             invalidateResolutionsOfFailedLookupLocations();
-            if (forceAllFilesAsInvalidated) {
-                // Any file asked would have invalidated resolution
-                filesWithInvalidatedResolutions = undefined;
-                return returnTrue;
-            }
             const collected = filesWithInvalidatedResolutions;
             filesWithInvalidatedResolutions = undefined;
-            return path => (!!collected && collected.has(path)) ||
+            return path => customHasInvalidatedResolutions(path) ||
+                !!collected?.has(path) ||
                 isFileWithInvalidatedNonRelativeUnresolvedImports(path);
         }
 
@@ -360,8 +356,6 @@ namespace ts {
                 if (watcher.files === 0 && watcher.resolutions === 0) {
                     fileWatchesOfAffectingLocations.delete(path);
                     watcher.watcher.close();
-                    // Ensure when watching symlinked package.json, we can close the actual file watcher only once
-                    watcher.watcher = noopFileWatcher;
                 }
             });
 
@@ -771,17 +765,25 @@ namespace ts {
             }
             const paths = new Set<string>();
             paths.add(locationToWatch);
+            let actualWatcher = canWatchDirectoryOrFile(resolutionHost.toPath(locationToWatch)) ?
+                resolutionHost.watchAffectingFileLocation(locationToWatch, (fileName, eventKind) => {
+                    cachedDirectoryStructureHost?.addOrDeleteFile(fileName, resolutionHost.toPath(locationToWatch), eventKind);
+                    const packageJsonMap = moduleResolutionCache.getPackageJsonInfoCache().getInternalMap();
+                    paths.forEach(path => {
+                        if (watcher.resolutions) (affectingPathChecks ??= new Set()).add(path);
+                        if (watcher.files) (affectingPathChecksForFile ??= new Set()).add(path);
+                        packageJsonMap?.delete(resolutionHost.toPath(path));
+                    });
+                    resolutionHost.scheduleInvalidateResolutionsOfFailedLookupLocations();
+                }) : noopFileWatcher;
             const watcher: FileWatcherOfAffectingLocation = {
-                watcher: canWatchDirectoryOrFile(resolutionHost.toPath(locationToWatch)) ?
-                    resolutionHost.watchAffectingFileLocation(locationToWatch, (fileName, eventKind) => {
-                        cachedDirectoryStructureHost?.addOrDeleteFile(fileName, resolutionHost.toPath(locationToWatch), eventKind);
-                        paths.forEach(path => {
-                            if (watcher.resolutions) (affectingPathChecks ??= new Set()).add(path);
-                            if (watcher.files) (affectingPathChecksForFile ??= new Set()).add(path);
-                            moduleResolutionCache.getPackageJsonInfoCache().getInternalMap()?.delete(resolutionHost.toPath(path));
-                        });
-                        resolutionHost.scheduleInvalidateResolutionsOfFailedLookupLocations();
-                    }) : noopFileWatcher,
+                watcher: actualWatcher !== noopFileWatcher ? {
+                    close: () => {
+                        actualWatcher.close();
+                        // Ensure when watching symlinked package.json, we can close the actual file watcher only once
+                        actualWatcher = noopFileWatcher;
+                    }
+                } : actualWatcher,
                 resolutions: forResolution ? 1 : 0,
                 files: forResolution ? 0 : 1,
                 paths,

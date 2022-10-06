@@ -172,7 +172,7 @@ namespace ts.server {
         readonly realpath?: (path: string) => string;
 
         /*@internal*/
-        hasInvalidatedResolution: HasInvalidatedResolution | undefined;
+        hasInvalidatedResolutions: HasInvalidatedResolutions | undefined;
 
         /*@internal*/
         resolutionCache: ResolutionCache;
@@ -256,12 +256,12 @@ namespace ts.server {
 
         /*@internal*/
         public static async importServicePluginAsync(moduleName: string, initialDir: string, host: ServerHost, log: (message: string) => void, logErrors?: (message: string) => void): Promise<{} | undefined> {
-            Debug.assertIsDefined(host.importServicePlugin);
+            Debug.assertIsDefined(host.importPlugin);
             const resolvedPath = combinePaths(initialDir, "node_modules");
             log(`Dynamically importing ${moduleName} from ${initialDir} (resolved to ${resolvedPath})`);
             let result: ModuleImportResult;
             try {
-                result = await host.importServicePlugin(resolvedPath, moduleName);
+                result = await host.importPlugin(resolvedPath, moduleName);
             }
             catch (e) {
                 result = { module: undefined, error: e };
@@ -1176,7 +1176,7 @@ namespace ts.server {
             Debug.assert(!this.isClosed(), "Called update graph worker of closed project");
             this.writeLog(`Starting updateGraphWorker: Project: ${this.getProjectName()}`);
             const start = timestamp();
-            this.hasInvalidatedResolution = this.resolutionCache.createHasInvalidatedResolution();
+            this.hasInvalidatedResolutions = this.resolutionCache.createHasInvalidatedResolutions(returnFalse);
             this.resolutionCache.startCachingPerDirectoryResolution();
             this.program = this.languageService.getProgram(); // TODO: GH#18217
             this.dirty = false;
@@ -1605,9 +1605,10 @@ namespace ts.server {
         }
 
         protected enableGlobalPlugins(options: CompilerOptions, pluginConfigOverrides: Map<any> | undefined): void {
+            if (!this.projectService.globalPlugins.length) return;
             const host = this.projectService.host;
 
-            if (!host.require && !host.importServicePlugin) {
+            if (!host.require && !host.importPlugin) {
                 this.projectService.logger.info("Plugins were requested but not running in environment that supports 'require'. Nothing will be loaded");
                 return;
             }
@@ -1619,20 +1620,18 @@ namespace ts.server {
                 combinePaths(this.projectService.getExecutingFilePath(), "../../.."),
             ];
 
-            if (this.projectService.globalPlugins) {
-                // Enable global plugins with synthetic configuration entries
-                for (const globalPluginName of this.projectService.globalPlugins) {
-                    // Skip empty names from odd commandline parses
-                    if (!globalPluginName) continue;
+            // Enable global plugins with synthetic configuration entries
+            for (const globalPluginName of this.projectService.globalPlugins) {
+                // Skip empty names from odd commandline parses
+                if (!globalPluginName) continue;
 
-                    // Skip already-locally-loaded plugins
-                    if (options.plugins && options.plugins.some(p => p.name === globalPluginName)) continue;
+                // Skip already-locally-loaded plugins
+                if (options.plugins && options.plugins.some(p => p.name === globalPluginName)) continue;
 
-                    // Provide global: true so plugins can detect why they can't find their config
-                    this.projectService.logger.info(`Loading global plugin ${globalPluginName}`);
+                // Provide global: true so plugins can detect why they can't find their config
+                this.projectService.logger.info(`Loading global plugin ${globalPluginName}`);
 
-                    this.enablePlugin({ name: globalPluginName, global: true } as PluginImport, searchPaths, pluginConfigOverrides);
-                }
+                this.enablePlugin({ name: globalPluginName, global: true } as PluginImport, searchPaths, pluginConfigOverrides);
             }
         }
 
@@ -1658,7 +1657,7 @@ namespace ts.server {
          */
         /*@internal*/
         async beginEnablePluginAsync(pluginConfigEntry: PluginImport, searchPaths: string[], pluginConfigOverrides: Map<any> | undefined): Promise<BeginEnablePluginResult> {
-            Debug.assertIsDefined(this.projectService.host.importServicePlugin);
+            Debug.assertIsDefined(this.projectService.host.importPlugin);
 
             let errorLogs: string[] | undefined;
             const log = (message: string) => this.projectService.logger.info(message);
@@ -1721,7 +1720,7 @@ namespace ts.server {
                 const pluginModule = pluginModuleFactory({ typescript: ts });
                 const newLS = pluginModule.create(info);
                 for (const k of Object.keys(this.languageService)) {
-                    // eslint-disable-next-line no-in-operator
+                    // eslint-disable-next-line local/no-in-operator
                     if (!(k in newLS)) {
                         this.projectService.logger.info(`Plugin activation warning: Missing proxied method ${k} in created LS. Patching.`);
                         (newLS as any)[k] = (this.languageService as any)[k];
@@ -2521,9 +2520,9 @@ namespace ts.server {
 
         /*@internal*/
         enablePluginsWithOptions(options: CompilerOptions, pluginConfigOverrides: ESMap<string, any> | undefined): void {
+            if (!options.plugins?.length && !this.projectService.globalPlugins.length) return;
             const host = this.projectService.host;
-
-            if (!host.require && !host.importServicePlugin) {
+            if (!host.require && !host.importPlugin) {
                 this.projectService.logger.info("Plugins were requested but not running in environment that supports 'require'. Nothing will be loaded");
                 return;
             }
